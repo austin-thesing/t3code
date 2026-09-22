@@ -6560,10 +6560,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                     </span>
                                   }
                                 />
-                                <TooltipPopup
-                                  side="top"
-                                  className="max-w-64 whitespace-normal leading-tight"
-                                >
+                                <TooltipPopup side="top" width="sm">
                                   Draft attachment could not be saved locally and may be lost on
                                   navigation.
                                 </TooltipPopup>
@@ -6595,10 +6592,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                 >
                                   <RefreshIcon />
                                 </TooltipTrigger>
-                                <TooltipPopup
-                                  side="top"
-                                  className="max-w-64 whitespace-normal leading-tight"
-                                >
+                                <TooltipPopup side="top" width="sm">
                                   {upload.reason}
                                 </TooltipPopup>
                               </Tooltip>
@@ -6695,10 +6689,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               >
                                 <RefreshIcon />
                               </TooltipTrigger>
-                              <TooltipPopup
-                                side="top"
-                                className="max-w-64 whitespace-normal leading-tight"
-                              >
+                              <TooltipPopup side="top" width="sm">
                                 {upload.reason}
                               </TooltipPopup>
                             </Tooltip>
@@ -6778,10 +6769,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               >
                                 <RefreshIcon />
                               </TooltipTrigger>
-                              <TooltipPopup
-                                side="top"
-                                className="max-w-64 whitespace-normal leading-tight"
-                              >
+                              <TooltipPopup side="top" width="sm">
                                 {upload.reason}
                               </TooltipPopup>
                             </Tooltip>

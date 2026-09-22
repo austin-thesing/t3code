@@ -146,7 +146,7 @@ export function DraftHeroHeadline({
           {activeProjectDisplayName ?? "Choose a project"}
         </TooltipTrigger>
         {activeProjectDisplayName ? (
-          <TooltipPopup side="top" className="max-w-80">
+          <TooltipPopup side="top" width="lg">
             {activeProjectDisplayName}
           </TooltipPopup>
         ) : null}
@@ -202,7 +202,7 @@ export function DraftHeroHeadline({
                   <TooltipTrigger render={<span className="block min-w-0 truncate" />}>
                     {group.displayName}
                   </TooltipTrigger>
-                  <TooltipPopup side="top" className="max-w-80">
+                  <TooltipPopup side="top" width="lg">
                     {group.displayName}
                   </TooltipPopup>
                 </Tooltip>

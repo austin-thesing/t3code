@@ -58,7 +58,7 @@ export function PullRequestCopyableCode({
           Copied
         </span>
       </TooltipTrigger>
-      <TooltipPopup className="max-w-96 wrap-anywhere font-mono" side={tooltipSide}>
+      <TooltipPopup variant="code" width="xl" side={tooltipSide}>
         {`${isCopied ? "Copied" : copyLabel}: ${value}`}
       </TooltipPopup>
     </Tooltip>

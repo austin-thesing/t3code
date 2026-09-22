@@ -2280,7 +2280,7 @@ function CompactFilterMenu<Value extends string>({
             ) : (
               <Tooltip key={option.value}>
                 <TooltipTrigger render={item} />
-                <TooltipPopup side="right" className="max-w-64 break-words">
+                <TooltipPopup side="right" width="sm">
                   {option.unavailable}
                 </TooltipPopup>
               </Tooltip>

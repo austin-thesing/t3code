@@ -156,7 +156,7 @@ export function PolicyTooltip({ children }: { readonly children: string }) {
           </Button>
         }
       />
-      <TooltipPopup side="top" className="max-w-72">
+      <TooltipPopup side="top" width="md">
         {children}
       </TooltipPopup>
     </Tooltip>
@@ -372,7 +372,7 @@ export function SettingsRow({
           {control}
         </div>
       </TooltipTrigger>
-      <TooltipPopup side="top" className="max-w-72">
+      <TooltipPopup side="top" width="md">
         {message}
       </TooltipPopup>
     </Tooltip>

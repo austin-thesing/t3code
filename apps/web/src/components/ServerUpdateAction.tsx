@@ -163,7 +163,7 @@ export function ServerUpdateProgress({
         <span className="size-1.5 shrink-0 rounded-full bg-destructive" aria-hidden="true" />
         <Tooltip>
           <TooltipTrigger render={<span className="min-w-0 truncate">{state.message}</span>} />
-          <TooltipPopup side="top" className="max-w-80">
+          <TooltipPopup side="top" width="lg">
             {state.message}
           </TooltipPopup>
         </Tooltip>

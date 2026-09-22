@@ -202,7 +202,7 @@ function PullRequestFilterRadioGroup<Value extends string>({
         return (
           <Tooltip key={option.value}>
             <TooltipTrigger render={item} />
-            <TooltipPopup side="top" className="max-w-80">
+            <TooltipPopup side="top" width="lg">
               {option.unavailable}
             </TooltipPopup>
           </Tooltip>

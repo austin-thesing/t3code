@@ -56,7 +56,7 @@ export function ComposerServerUpdateStatus({
             </button>
           }
         />
-        <TooltipPopup side="top" className="max-w-80">
+        <TooltipPopup side="top" width="lg">
           {title}: {detail}
         </TooltipPopup>
       </Tooltip>

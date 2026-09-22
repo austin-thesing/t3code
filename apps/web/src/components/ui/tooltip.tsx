@@ -10,12 +10,23 @@ function TooltipTrigger(props: TooltipPrimitive.Trigger.Props) {
   return <TooltipPrimitive.Trigger data-slot="tooltip-trigger" {...props} />;
 }
 
+// Tooltips are single-line by default. A width caps the popup and lets the
+// content wrap; the positioner already clamps every width to the viewport.
+const tooltipWidthClassName = {
+  sm: "max-w-64",
+  md: "max-w-72",
+  lg: "max-w-80",
+  xl: "max-w-96",
+  "2xl": "max-w-120",
+} as const;
+
 function TooltipPopup({
   className,
   align = "center",
   sideOffset = 4,
   side = "top",
   variant = "default",
+  width,
   anchor,
   children,
   ...props
@@ -23,7 +34,9 @@ function TooltipPopup({
   align?: TooltipPrimitive.Positioner.Props["align"];
   side?: TooltipPrimitive.Positioner.Props["side"];
   sideOffset?: TooltipPrimitive.Positioner.Props["sideOffset"];
-  variant?: "default" | "glass";
+  /** `code` renders monospace content that breaks anywhere, for paths and commands. */
+  variant?: "default" | "glass" | "code";
+  width?: keyof typeof tooltipWidthClassName;
   anchor?: TooltipPrimitive.Positioner.Props["anchor"];
 }) {
   return (
@@ -42,6 +55,11 @@ function TooltipPopup({
             variant === "glass"
               ? "dropdown-glass shadow-xl shadow-black/25 before:hidden"
               : "border bg-popover not-dark:bg-clip-padding shadow-md/5",
+            variant === "code" && "wrap-anywhere text-left font-mono text-[11px] leading-relaxed",
+            width && [
+              tooltipWidthClassName[width],
+              "wrap-anywhere whitespace-normal text-left leading-snug",
+            ],
             className,
           )}
           data-slot="tooltip-popup"
