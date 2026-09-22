@@ -19,10 +19,31 @@ import {
   OpenCodeRuntime,
   OpenCodeRuntimeError,
   OpenCodeRuntimeLive,
+  parseOpenCodeServerReady,
   resolveOpenCodeConfigContent,
   resolveOpenCodeServerPassword,
   verifyOpenCodeServerVersion,
 } from "./opencodeRuntime.ts";
+
+describe("parseOpenCodeServerReady", () => {
+  it.each([
+    ["opencode server listening", "v1"],
+    ["server listening", "v2"],
+  ])("recognizes %s only after the complete URL arrives", (prefix, protocol) => {
+    const line = `${prefix} on http://127.0.0.1:54321`;
+    expect(parseOpenCodeServerReady(line)).toBeNull();
+    expect(parseOpenCodeServerReady(`starting up\n${line}\r\n`)).toEqual({
+      url: "http://127.0.0.1:54321",
+      protocol,
+    });
+  });
+
+  it("ignores unrelated URLs and password output", () => {
+    expect(
+      parseOpenCodeServerReady("docs https://opencode.ai\nserver password secret\n"),
+    ).toBeNull();
+  });
+});
 
 describe("resolveOpenCodeConfigContent", () => {
   it("prefers the caller environment over the inherited environment", () => {
@@ -52,6 +73,20 @@ describe("resolveOpenCodeServerPassword", () => {
         {},
       ),
     ).toBe(" env password ");
+  });
+
+  it("prefers the v2 environment variable and still lets settings override it", () => {
+    const environment = { OPENCODE_PASSWORD: "new-secret", OPENCODE_SERVER_PASSWORD: "old-secret" };
+    expect(resolveOpenCodeServerPassword({ external: false, environment }, {})).toBe("new-secret");
+    expect(
+      resolveOpenCodeServerPassword(
+        { external: false, environment, serverPassword: "settings" },
+        {},
+      ),
+    ).toBe("settings");
+    expect(
+      resolveOpenCodeServerPassword({ external: true, environment }, environment),
+    ).toBeUndefined();
   });
 
   it("uses the settings password for a local server", () => {
@@ -163,7 +198,7 @@ describe("verifyOpenCodeServerVersion", () => {
   );
 });
 
-describe("OpenCode server output", () => {
+describe.each(["1.14.19", "2.0.12"])("OpenCode %s server output", (version) => {
   effectIt.live(
     "drains stdout and stderr after startup so server requests can finish",
     () =>
@@ -184,17 +219,30 @@ describe("OpenCode server output", () => {
 const writeOutput = (stream) => new Promise((resolve, reject) => {
   stream.write("x".repeat(2 * 1024 * 1024), (error) => error ? reject(error) : resolve());
 });
+const version = "${version}";
+const v2 = version.startsWith("2.");
+const password = process.env.OPENCODE_PASSWORD;
+if (!password || password !== process.env.OPENCODE_SERVER_PASSWORD) process.exit(2);
 const server = createServer(async (request, response) => {
-  if (request.url.startsWith("/global/health")) {
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({ healthy: true, version: "1.14.19" }));
+  if (request.url.startsWith("/global/health") || request.url.startsWith("/api/info")) {
+    if (request.headers.authorization !== "Basic " + Buffer.from("opencode:" + password).toString("base64")) {
+      response.writeHead(401).end();
+      return;
+    }
+    const supported = v2 ? request.url.startsWith("/api/info") : request.url.startsWith("/global/health");
+    response.setHeader("Content-Type", supported ? "application/json" : "text/html");
+    response.end(supported ? JSON.stringify(v2
+      ? { version, pid: process.pid, urls: [], paths: { tmp: "test" } }
+      : { healthy: true, version }) : "<!doctype html><title>OpenCode</title>");
     return;
   }
   await Promise.all([writeOutput(process.stdout), writeOutput(process.stderr)]);
   response.end("drained");
 });
 server.listen(0, "127.0.0.1", () => {
-  process.stdout.write("opencode server listening on http://127.0.0.1:" + server.address().port + "\\n");
+  const ready = (v2 ? "" : "opencode ") + "server listening on http://127.0.0.1:" + server.address().port;
+  process.stdout.write(ready.slice(0, -2));
+  setImmediate(() => process.stdout.write(ready.slice(-2) + "\\n"));
 });
 `,
         );
@@ -227,6 +275,16 @@ server.listen(0, "127.0.0.1", () => {
 
         expect(yield* response.text).toBe("drained");
         expect(yield* server.isRunning).toBe(true);
+        expect(server.version).toBe(version);
+        expect(server.serverPassword).toBeTruthy();
+        const external = yield* runtime.connectToOpenCodeServer({
+          binaryPath: "must-not-be-launched",
+          directory: tempDir,
+          serverUrl: server.url,
+          ...(server.serverPassword !== undefined ? { serverPassword: server.serverPassword } : {}),
+        });
+        expect(external.version).toBe(version);
+        expect(external.external).toBe(true);
       }).pipe(
         Effect.scoped,
         Effect.provide([

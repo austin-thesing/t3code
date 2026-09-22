@@ -31,6 +31,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { parseSemver } from "@t3tools/shared/semver";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -508,7 +509,11 @@ function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
   if (normalized === "todowrite" || normalized === "todoread") {
     return "dynamic_tool_call";
   }
-  if (normalized.includes("bash") || normalized.includes("command")) {
+  if (
+    normalized.includes("bash") ||
+    normalized.includes("shell") ||
+    normalized.includes("command")
+  ) {
     return "command_execution";
   }
   if (
@@ -1749,7 +1754,7 @@ export function makeOpenCodeAdapter(
       }
       const patterns = request.patterns.filter((pattern) => pattern !== "*");
       const detail =
-        request.permission === "bash" && patterns.length > 0
+        (request.permission === "bash" || request.permission === "shell") && patterns.length > 0
           ? patterns.join("\n")
           : [request.permission.replaceAll("_", " "), ...patterns].join("\n");
       context.autoRepliedRequestIds.delete(request.id);
@@ -2863,6 +2868,7 @@ export function makeOpenCodeAdapter(
               });
               const client = openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,
+                version: server.version,
                 directory,
                 ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
               });
@@ -3177,11 +3183,15 @@ export function makeOpenCodeAdapter(
             : undefined;
           context.pendingIdleReconciliation = undefined;
           const promptGeneration = context.promptGeneration + 1;
+          // v2 commands acknowledge their callback without accepting a client
+          // message ID; v1 command responses wait for the generated turn.
+          const nativeCommandRequiresReceipt =
+            nativeCommand !== undefined && (parseSemver(context.server.version)?.major ?? 1) < 2;
           const promptAdmission: OpenCodePromptAdmission = {
             generation: promptGeneration,
             turnId,
             messageId,
-            requiresMessageReceipt: nativeCommand !== undefined,
+            requiresMessageReceipt: nativeCommandRequiresReceipt,
             priorAwaitingBusy,
             priorIdle: priorIdleCandidate,
             idleDuringAdmission: undefined,
@@ -3247,30 +3257,35 @@ export function makeOpenCodeAdapter(
           const submissionMethod = nativeCommand ? "session.command" : "session.promptAsync";
           // Native commands expand provider-owned templates. Their API does not
           // accept the per-turn system addendum supported by ordinary prompts.
-          const submission = nativeCommand
-            ? Effect.raceFirst(
-                runOpenCodeSdk("session.command", (signal) =>
-                  context.client.session.command(
-                    {
-                      sessionID: context.openCodeSessionId,
-                      messageID: messageId,
-                      command: nativeCommand.name,
-                      arguments: commandMatch?.[2] ?? "",
-                      model: `${parsedModel.providerID}/${parsedModel.modelID}`,
-                      ...(context.activeAgent ? { agent: context.activeAgent } : {}),
-                      ...(context.activeVariant ? { variant: context.activeVariant } : {}),
-                      parts: fileParts,
-                    },
-                    { signal },
-                  ),
-                ).pipe(Effect.asVoid),
-                // A command response waits for generation. Only bound admission;
-                // the user-message receipt proves OpenCode accepted the command.
-                Deferred.await(promptAdmission.messageReceipt).pipe(
-                  Effect.timeout("10 seconds"),
-                  Effect.andThen(Effect.never),
+          const commandSubmission = nativeCommand
+            ? runOpenCodeSdk("session.command", (signal) =>
+                context.client.session.command(
+                  {
+                    sessionID: context.openCodeSessionId,
+                    messageID: messageId,
+                    command: nativeCommand.name,
+                    arguments: commandMatch?.[2] ?? "",
+                    model: `${parsedModel.providerID}/${parsedModel.modelID}`,
+                    ...(context.activeAgent ? { agent: context.activeAgent } : {}),
+                    ...(context.activeVariant ? { variant: context.activeVariant } : {}),
+                    parts: fileParts,
+                  },
+                  { signal },
                 ),
-              )
+              ).pipe(Effect.asVoid)
+            : undefined;
+          const submission = commandSubmission
+            ? nativeCommandRequiresReceipt
+              ? Effect.raceFirst(
+                  commandSubmission,
+                  // A command response waits for generation. Only bound admission;
+                  // the user-message receipt proves OpenCode accepted the command.
+                  Deferred.await(promptAdmission.messageReceipt).pipe(
+                    Effect.timeout("10 seconds"),
+                    Effect.andThen(Effect.never),
+                  ),
+                )
+              : commandSubmission.pipe(Effect.timeout("10 seconds"))
             : runOpenCodeSdk("session.promptAsync", (signal) =>
                 context.client.session.promptAsync(
                   {
@@ -3290,6 +3305,13 @@ export function makeOpenCodeAdapter(
                 ),
               ).pipe(Effect.timeout("10 seconds"), Effect.asVoid);
           const promptEffect = submission.pipe(
+            Effect.tap(() => {
+              if (!nativeCommand || nativeCommandRequiresReceipt) return Effect.void;
+              // The v2 callback response is the receipt, including commands
+              // that finish without appending a user message.
+              promptAdmission.messageObserved = true;
+              return Deferred.succeed(promptAdmission.messageReceipt, undefined);
+            }),
             Effect.catchTags({
               OpenCodeRuntimeError: (cause) => Effect.fail(toRequestError(cause)),
               TimeoutError: (cause) => {
@@ -3490,8 +3512,11 @@ export function makeOpenCodeAdapter(
           ) {
             context.awaitingBusyAfterInterruption = false;
             const idle = promptAdmission.idleDuringAdmission;
-            if (idle && !promptAdmission.idleObservedAfterMessage) {
-              yield* schedulePromptAdmissionRecovery(context, idle.raw);
+            if (
+              (idle && !promptAdmission.idleObservedAfterMessage) ||
+              (nativeCommand && !nativeCommandRequiresReceipt)
+            ) {
+              yield* schedulePromptAdmissionRecovery(context, idle?.raw);
             } else {
               context.promptAdmission = undefined;
             }

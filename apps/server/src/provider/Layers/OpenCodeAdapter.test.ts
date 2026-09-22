@@ -67,6 +67,7 @@ type MessageEntry = {
 
 const runtimeMock = {
   state: {
+    serverVersion: "1.15.13",
     startCalls: [] as string[],
     sessionCreateUrls: [] as string[],
     sessionCreateInputs: [] as Array<Record<string, unknown>>,
@@ -137,6 +138,7 @@ const runtimeMock = {
     forkCalls: [] as Array<{ sessionID: string; directory?: string; messageID?: string }>,
   },
   reset() {
+    this.state.serverVersion = "1.15.13";
     this.state.startCalls.length = 0;
     this.state.sessionCreateUrls.length = 0;
     this.state.sessionCreateInputs.length = 0;
@@ -212,7 +214,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       );
       return {
         url,
-        version: "1.15.13",
+        version: runtimeMock.state.serverVersion,
         ...(serverPassword ? { serverPassword } : {}),
         exitCode: Effect.never,
         isRunning: Effect.succeed(true),
@@ -233,7 +235,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       );
       return {
         url,
-        version: "1.15.13",
+        version: runtimeMock.state.serverVersion,
         ...(serverPassword ? { serverPassword } : {}),
         exitCode: null,
         external: Boolean(serverUrl),
@@ -1507,6 +1509,32 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       yield* adapter.interruptTurn(threadId, result.turnId);
       NodeAssert.equal(runtimeMock.state.abortCalls.length, 1);
       NodeAssert.equal((yield* adapter.listSessions())[0]?.activeTurnId, undefined);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("accepts a v2 command callback without waiting for a nonexistent message receipt", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.serverVersion = "2.0.12";
+      runtimeMock.state.autoPromptEcho = false;
+      runtimeMock.state.commandImplementation = async () => undefined;
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-v2-command");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/review main",
+        modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+      });
+      yield* advanceTestClock(5_000);
+      const session = (yield* adapter.listSessions())[0];
+      NodeAssert.equal(session?.status, "ready");
+      NodeAssert.equal(session?.activeTurnId, undefined);
+      NodeAssert.equal(runtimeMock.state.messageCalls.length, 0);
       yield* adapter.stopSession(threadId);
     }),
   );

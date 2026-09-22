@@ -507,6 +507,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       NodeAssert.deepEqual(runtimeMock.state.sdkClientInputs, [
         {
           baseUrl: "http://127.0.0.1:4301",
+          version: "1.14.19",
           directory: process.cwd(),
           serverPassword: "secret-password",
         },
@@ -525,6 +526,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       NodeAssert.deepEqual(runtimeMock.state.sdkClientInputs, [
         {
           baseUrl: "http://127.0.0.1:4301",
+          version: "1.14.19",
           directory: process.cwd(),
           serverPassword: "environment-password",
         },
@@ -573,6 +575,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
       NodeAssert.deepEqual(runtimeMock.state.sdkClientInputs, [
         {
           baseUrl: "http://127.0.0.1:9999",
+          version: "1.14.19",
           directory: process.cwd(),
         },
       ]);

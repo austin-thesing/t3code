@@ -15,6 +15,7 @@ import {
 } from "@opencode-ai/sdk/v2";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -28,7 +29,10 @@ import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { FetchHttpClient, HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+
+import { createOpenCodeV2Client } from "./opencodeV2Client.ts";
 
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { collectStreamAsString } from "./providerSnapshot.ts";
@@ -73,12 +77,17 @@ export function resolveOpenCodeServerPassword(
   if (input.external) {
     return undefined;
   }
-  return input.environment === undefined
-    ? inheritedEnvironment.OPENCODE_SERVER_PASSWORD
-    : input.environment.OPENCODE_SERVER_PASSWORD;
+  const environment = input.environment ?? inheritedEnvironment;
+  return environment.OPENCODE_PASSWORD ?? environment.OPENCODE_SERVER_PASSWORD;
 }
 
-const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
+const OpenCodeServerInfoSchema = Schema.Struct({
+  version: Schema.String,
+  pid: Schema.Finite,
+  urls: Schema.Array(Schema.String),
+  paths: Schema.Struct({ tmp: Schema.String }),
+});
+const decodeOpenCodeServerInfo = Schema.decodeUnknownOption(OpenCodeServerInfoSchema);
 const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
 const DEFAULT_HOSTNAME = "127.0.0.1";
 const OPENCODE_SERVER_STARTUP_MAX_OUTPUT_CHARS = 64 * 1024;
@@ -268,6 +277,7 @@ export interface OpenCodeRuntimeShape {
     readonly baseUrl: string;
     readonly directory: string;
     readonly serverPassword?: string;
+    readonly version?: string;
   }) => OpencodeClient;
   readonly loadOpenCodeInventory: (
     client: OpencodeClient,
@@ -287,15 +297,24 @@ export interface OpenCodeRuntimeShape {
   }) => Effect.Effect<ReadonlyArray<OpenCodeSkill>, OpenCodeRuntimeError>;
 }
 
-function parseServerUrlFromOutput(output: string): string | null {
-  for (const line of output.split("\n")) {
-    if (!line.startsWith(OPENCODE_SERVER_READY_PREFIX)) {
-      continue;
+export function parseOpenCodeServerReady(output: string): {
+  readonly url: string;
+  readonly protocol: "v1" | "v2";
+} | null {
+  // Wait for the newline: stdout can split in the middle of a URL or port.
+  for (const line of output.split("\n").slice(0, -1)) {
+    const match = line.trimEnd().match(/^(opencode )?server listening on (https?:\/\/[^\s]+)$/);
+    if (match?.[2]) {
+      return { url: match[2], protocol: match[1] ? "v1" : "v2" };
     }
-    const match = line.match(/on\s+(https?:\/\/[^\s]+)/);
-    return match?.[1] ?? null;
   }
   return null;
+}
+
+function redactOpenCodeStartupOutput(output: string, password: string): string {
+  return output
+    .replaceAll(password, "[redacted]")
+    .replace(/^server password .*/gm, "server password [redacted]");
 }
 
 const SLUG_LINE_RE = /^(\S+\/\S+)\s*$/;
@@ -590,6 +609,7 @@ function ensureRuntimeError(
 
 const makeOpenCodeRuntime = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const crypto = yield* Crypto.Crypto;
   const netService = yield* NetService.NetService;
   const hostPlatform = yield* HostProcessPlatform;
   const resolveCommand = (command: string, args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv) =>
@@ -651,18 +671,20 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     );
 
   const createOpenCodeSdkClient: OpenCodeRuntimeShape["createOpenCodeSdkClient"] = (input) =>
-    createOpencodeClient({
-      baseUrl: input.baseUrl,
-      directory: input.directory,
-      ...(input.serverPassword
-        ? {
-            headers: {
-              Authorization: `Basic ${Buffer.from(`opencode:${input.serverPassword}`, "utf8").toString("base64")}`,
-            },
-          }
-        : {}),
-      throwOnError: true,
-    });
+    (parseSemver(input.version ?? "1.0.0")?.major ?? 1) >= 2
+      ? createOpenCodeV2Client(input)
+      : createOpencodeClient({
+          baseUrl: input.baseUrl,
+          directory: input.directory,
+          ...(input.serverPassword
+            ? {
+                headers: {
+                  Authorization: `Basic ${Buffer.from(`opencode:${input.serverPassword}`, "utf8").toString("base64")}`,
+                },
+              }
+            : {}),
+          throwOnError: true,
+        });
 
   const startOpenCodeServerProcess: OpenCodeRuntimeShape["startOpenCodeServerProcess"] = (input) =>
     Effect.gen(function* () {
@@ -687,11 +709,22 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE_SERVER_TIMEOUT_MS;
       const args = ["serve", `--hostname=${hostname}`, `--port=${port}`];
       const spawnCommand = yield* resolveCommand(input.binaryPath, args, input.environment);
-      const serverPassword = resolveOpenCodeServerPassword({
-        external: false,
-        ...(input.serverPassword !== undefined ? { serverPassword: input.serverPassword } : {}),
-        ...(input.environment !== undefined ? { environment: input.environment } : {}),
-      });
+      const serverPassword =
+        resolveOpenCodeServerPassword({
+          external: false,
+          ...(input.serverPassword !== undefined ? { serverPassword: input.serverPassword } : {}),
+          ...(input.environment !== undefined ? { environment: input.environment } : {}),
+        }) ||
+        (yield* crypto.randomUUIDv4.pipe(
+          Effect.mapError(
+            (cause) =>
+              new OpenCodeRuntimeError({
+                operation: "startOpenCodeServerProcess",
+                detail: "Failed to generate an OpenCode server password.",
+                cause,
+              }),
+          ),
+        ));
 
       const child = yield* spawner
         .spawn(
@@ -700,7 +733,10 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
             shell: spawnCommand.shell,
             env: {
               ...input.environment,
-              ...(serverPassword !== undefined ? { OPENCODE_SERVER_PASSWORD: serverPassword } : {}),
+              // v2 authenticates by default and prefers OPENCODE_PASSWORD;
+              // v1 reads OPENCODE_SERVER_PASSWORD. Use the same secret for both.
+              OPENCODE_PASSWORD: serverPassword,
+              OPENCODE_SERVER_PASSWORD: serverPassword,
               // Respect an OPENCODE_CONFIG_CONTENT provided by the caller or
               // the inherited process environment, only falling back to the
               // empty config when neither is set. Setting it unconditionally
@@ -746,7 +782,10 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
       const stdoutRef = yield* Ref.make<string | null>("");
       const stderrRef = yield* Ref.make<string | null>("");
-      const readyDeferred = yield* Deferred.make<string, OpenCodeRuntimeError>();
+      const readyDeferred = yield* Deferred.make<
+        NonNullable<ReturnType<typeof parseOpenCodeServerReady>>,
+        OpenCodeRuntimeError
+      >();
 
       const setReadyFromStdoutChunk = (chunk: string) =>
         Ref.modify(stdoutRef, (stdout) => {
@@ -755,7 +794,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
           }
           const nextStdout = `${stdout}${chunk}`;
           return [
-            parseServerUrlFromOutput(nextStdout),
+            parseOpenCodeServerReady(nextStdout),
             nextStdout.slice(-OPENCODE_SERVER_STARTUP_MAX_OUTPUT_CHARS),
           ] as const;
         }).pipe(
@@ -786,8 +825,14 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       const exitFiber = yield* child.exitCode.pipe(
         Effect.flatMap((code) =>
           Effect.gen(function* () {
-            const stdout = (yield* Ref.get(stdoutRef)) ?? "";
-            const stderr = (yield* Ref.get(stderrRef)) ?? "";
+            const stdout = redactOpenCodeStartupOutput(
+              (yield* Ref.get(stdoutRef)) ?? "",
+              serverPassword,
+            );
+            const stderr = redactOpenCodeStartupOutput(
+              (yield* Ref.get(stderrRef)) ?? "",
+              serverPassword,
+            );
             const exitCode = Number(code);
             yield* Deferred.fail(
               readyDeferred,
@@ -840,10 +885,11 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       yield* Ref.set(stdoutRef, null);
       yield* Ref.set(stderrRef, null);
 
-      const url = readyOption.value;
+      const { url, protocol } = readyOption.value;
       const version = yield* verifyOpenCodeServerVersion(
         createOpenCodeSdkClient({
           baseUrl: url,
+          version: protocol === "v2" ? "2.0.0" : "1.0.0",
           directory: input.directory,
           ...(serverPassword !== undefined ? { serverPassword } : {}),
         }),
@@ -868,21 +914,46 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         external: true,
         ...(input.serverPassword !== undefined ? { serverPassword: input.serverPassword } : {}),
       });
-      return verifyOpenCodeServerVersion(
-        createOpenCodeSdkClient({
-          baseUrl: serverUrl,
-          directory: input.directory,
-          ...(serverPassword !== undefined ? { serverPassword } : {}),
-        }),
-      ).pipe(
-        Effect.map((version) => ({
+      return Effect.gen(function* () {
+        // v2 removed /global/health. Probe its public identity endpoint first;
+        // legacy servers may return their web UI for unknown routes.
+        const info = yield* HttpClient.get(
+          `${serverUrl.replace(/\/$/, "")}/api/info`,
+          serverPassword
+            ? {
+                headers: {
+                  Authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`, "utf8").toString("base64")}`,
+                },
+              }
+            : {},
+        ).pipe(
+          Effect.flatMap((response) =>
+            response.status === 200 &&
+            response.headers["content-type"]?.includes("application/json")
+              ? response.json.pipe(Effect.map(decodeOpenCodeServerInfo))
+              : Effect.succeedNone,
+          ),
+          Effect.provide(FetchHttpClient.layer),
+          Effect.timeoutOption(OPENCODE_HEALTH_TIMEOUT),
+          Effect.map(Option.flatten),
+          Effect.orElseSucceed(() => Option.none()),
+        );
+        const version = yield* verifyOpenCodeServerVersion(
+          createOpenCodeSdkClient({
+            baseUrl: serverUrl,
+            directory: input.directory,
+            ...(Option.isSome(info) ? { version: info.value.version } : {}),
+            ...(serverPassword !== undefined ? { serverPassword } : {}),
+          }),
+        );
+        return {
           url: serverUrl,
           ...(serverPassword !== undefined ? { serverPassword } : {}),
           version,
           exitCode: null,
           external: true,
-        })),
-      );
+        };
+      });
     }
 
     return startOpenCodeServerProcess({

@@ -504,6 +504,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
       .loadOpenCodeInventory(
         openCodeRuntime.createOpenCodeSdkClient({
           baseUrl: server.url,
+          version: server.version,
           directory: cwd,
           ...(server.serverPassword !== undefined ? { serverPassword: server.serverPassword } : {}),
         }),

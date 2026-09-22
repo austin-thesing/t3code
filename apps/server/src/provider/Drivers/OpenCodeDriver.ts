@@ -202,6 +202,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
                 });
                 const client = openCodeRuntime.createOpenCodeSdkClient({
                   baseUrl: server.url,
+                  version: server.version,
                   directory: cwd,
                   ...(effectiveConfig.serverPassword
                     ? { serverPassword: effectiveConfig.serverPassword }
@@ -214,6 +215,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
               loadWorkspaceInventory(
                 openCodeRuntime.createOpenCodeSdkClient({
                   baseUrl: server.url,
+                  version: server.version,
                   directory: cwd,
                   ...(server.serverPassword !== undefined
                     ? { serverPassword: server.serverPassword }
