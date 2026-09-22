@@ -319,6 +319,13 @@ function openCodeEventSessionId(event: OpenCodeSubscribedEvent): string | undefi
   return typeof sessionID === "string" ? sessionID : undefined;
 }
 
+function openCodeEventSequence(
+  event: OpenCodeSubscribedEvent,
+): { readonly aggregateId: string; readonly sequence: number } | undefined {
+  if (!("durable" in event)) return undefined;
+  return { aggregateId: event.durable.aggregateID, sequence: event.durable.seq };
+}
+
 function openCodeEventSessionTitle(event: OpenCodeSubscribedEvent): string | undefined {
   if (event.type !== "session.renamed") {
     return undefined;
@@ -375,6 +382,8 @@ interface OpenCodeSessionContext {
   readonly pendingQuestions: Map<string, OpenCodeForm>;
   readonly toolNamesById: Map<string, string>;
   readonly toolInputsById: Map<string, Record<string, unknown>>;
+  /** Highest durable event sequence observed for the parent session. */
+  lastParentEventSequence: number;
   turnTokenUsage: OpenCodeTurnTokenUsageAccumulator | undefined;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
@@ -408,6 +417,14 @@ interface OpenCodeSessionContext {
 
 interface OpenCodeTurnTokenUsageAccumulator {
   readonly partIds: Set<string>;
+  /**
+   * A new prompt owns only events committed after the parent session's
+   * durable sequence at admission. The event stream can replay an older
+   * event after the next turn begins.
+   */
+  readonly parentEventSequence: number;
+  readonly pendingAssistantMessageIds: Set<string>;
+  hasUnresolvedSteps: boolean;
   inputTokens: number;
   cachedInputTokens: number;
   cacheCreationTokens: number;
@@ -417,9 +434,14 @@ interface OpenCodeTurnTokenUsageAccumulator {
   hasSubagents: boolean;
 }
 
-function makeOpenCodeTurnTokenUsageAccumulator(): OpenCodeTurnTokenUsageAccumulator {
+function makeOpenCodeTurnTokenUsageAccumulator(
+  parentEventSequence: number,
+): OpenCodeTurnTokenUsageAccumulator {
   return {
     partIds: new Set(),
+    parentEventSequence,
+    pendingAssistantMessageIds: new Set(),
+    hasUnresolvedSteps: false,
     inputTokens: 0,
     cachedInputTokens: 0,
     cacheCreationTokens: 0,
@@ -436,7 +458,12 @@ function takeOpenCodeTurnTokenUsage(
 ): TurnTokenUsage {
   const usage = context.turnTokenUsage;
   context.turnTokenUsage = undefined;
-  if (!usage || usage.partIds.size === 0) {
+  if (
+    !usage ||
+    (usage.partIds.size === 0 &&
+      !usage.hasUnresolvedSteps &&
+      usage.pendingAssistantMessageIds.size === 0)
+  ) {
     return {
       usageStatus: "unavailable",
       usageScope: "main_agent",
@@ -444,7 +471,13 @@ function takeOpenCodeTurnTokenUsage(
     };
   }
   return {
-    usageStatus: complete && usage.complete ? "complete" : "partial",
+    usageStatus:
+      complete &&
+      usage.complete &&
+      !usage.hasUnresolvedSteps &&
+      usage.pendingAssistantMessageIds.size === 0
+        ? "complete"
+        : "partial",
     usageScope: "main_agent",
     inputTokens: usage.inputTokens,
     cachedInputTokens: usage.cachedInputTokens,
@@ -2059,6 +2092,14 @@ export function makeOpenCodeAdapter(
 
       const sessionID = openCodeEventSessionId(event);
       const isParentEvent = sessionID === context.openCodeSessionId;
+      const durableEvent = openCodeEventSequence(event);
+      const eventSequence =
+        isParentEvent && durableEvent?.aggregateId === context.openCodeSessionId
+          ? durableEvent.sequence
+          : undefined;
+      if (eventSequence !== undefined) {
+        context.lastParentEventSequence = Math.max(context.lastParentEventSequence, eventSequence);
+      }
       const isRequestEvent = isOpenCodeChildRequestEvent(event);
       let isKnownPendingTerminalEvent = false;
       if (
@@ -2186,6 +2227,13 @@ export function makeOpenCodeAdapter(
           }
           break;
         }
+        case "session.step.started": {
+          const usage = context.turnTokenUsage;
+          if (usage && eventSequence !== undefined && eventSequence > usage.parentEventSequence) {
+            usage.pendingAssistantMessageIds.add(event.data.assistantMessageID);
+          }
+          break;
+        }
         case "session.text.delta":
         case "session.reasoning.delta": {
           if (turnId && event.data.delta.length > 0) {
@@ -2209,16 +2257,21 @@ export function makeOpenCodeAdapter(
         }
         case "session.step.ended": {
           const usage = context.turnTokenUsage;
-          if (usage && !usage.partIds.has(event.id)) {
-            usage.partIds.add(event.id);
-            usage.inputTokens +=
-              event.data.tokens.input +
-              event.data.tokens.cache.read +
-              event.data.tokens.cache.write;
-            usage.cachedInputTokens += event.data.tokens.cache.read;
-            usage.cacheCreationTokens += event.data.tokens.cache.write;
-            usage.outputTokens += event.data.tokens.output + event.data.tokens.reasoning;
-            usage.reasoningTokens += event.data.tokens.reasoning;
+          if (usage && eventSequence !== undefined && eventSequence > usage.parentEventSequence) {
+            if (usage.partIds.has(event.id)) break;
+            if (usage.pendingAssistantMessageIds.delete(event.data.assistantMessageID)) {
+              usage.partIds.add(event.id);
+              usage.inputTokens +=
+                event.data.tokens.input +
+                event.data.tokens.cache.read +
+                event.data.tokens.cache.write;
+              usage.cachedInputTokens += event.data.tokens.cache.read;
+              usage.cacheCreationTokens += event.data.tokens.cache.write;
+              usage.outputTokens += event.data.tokens.output + event.data.tokens.reasoning;
+              usage.reasoningTokens += event.data.tokens.reasoning;
+            } else {
+              usage.hasUnresolvedSteps = true;
+            }
           }
           break;
         }
@@ -2673,6 +2726,7 @@ export function makeOpenCodeAdapter(
           pendingQuestions: new Map(),
           toolNamesById: new Map(),
           toolInputsById: new Map(),
+          lastParentEventSequence: 0,
           turnTokenUsage: undefined,
           activeTurnId: undefined,
           activeAgent: undefined,
@@ -2857,7 +2911,9 @@ export function makeOpenCodeAdapter(
 
           context.activeTurnId = turnId;
           if (steeringTurnId === undefined) {
-            context.turnTokenUsage = makeOpenCodeTurnTokenUsageAccumulator();
+            context.turnTokenUsage = makeOpenCodeTurnTokenUsageAccumulator(
+              context.lastParentEventSequence,
+            );
           }
           context.activeAgent =
             agent ?? (input.interactionMode === "plan" ? "plan" : context.defaultAgent);
@@ -3612,6 +3668,7 @@ export function makeOpenCodeAdapter(
           context.relatedSessionIds.add(forkedSessionId);
           context.toolNamesById.clear();
           context.toolInputsById.clear();
+          context.lastParentEventSequence = 0;
           context.turnTokenUsage = undefined;
           context.activeTurnId = undefined;
           context.interruptedTurnId = undefined;

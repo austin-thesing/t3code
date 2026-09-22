@@ -4549,6 +4549,19 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const succeeded = promiseWithResolvers<unknown>();
       const sessionID = "http://127.0.0.1:9999/session";
       runtimeMock.state.subscribedEvents = [
+        {
+          id: "step-started",
+          created: 1,
+          type: "session.step.started",
+          durable: { aggregateID: sessionID, seq: 1, version: 1 },
+          data: {
+            sessionID,
+            assistantMessageID: "msg",
+            agent: "build",
+            model: { providerID: "openai", id: "gpt-5" },
+            started: 1,
+          },
+        } satisfies OpenCodeEvent,
         text.promise,
         reasoning.promise,
         step.promise,
@@ -4586,7 +4599,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         id: "step",
         created: 3,
         type: "session.step.ended",
-        durable: { aggregateID: sessionID, seq: 1, version: 1 },
+        durable: { aggregateID: sessionID, seq: 2, version: 1 },
         data: {
           sessionID,
           assistantMessageID: "msg",
@@ -4599,7 +4612,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         id: "done",
         created: 4,
         type: "session.execution.succeeded",
-        durable: { aggregateID: sessionID, seq: 2, version: 1 },
+        durable: { aggregateID: sessionID, seq: 3, version: 1 },
         data: { sessionID },
       } satisfies OpenCodeEvent);
       const events = Array.from(yield* Fiber.join(eventsFiber));
@@ -4629,6 +4642,145 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           reasoningTokens: 2,
           hasSubagents: false,
         });
+    }),
+  );
+
+  it.effect("does not charge a replayed step to the next native turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-native-replayed-step-usage");
+      const firstStarted = promiseWithResolvers<unknown>();
+      const firstSucceeded = promiseWithResolvers<unknown>();
+      const secondStarted = promiseWithResolvers<unknown>();
+      const replayedFirstStep = promiseWithResolvers<unknown>();
+      const secondStep = promiseWithResolvers<unknown>();
+      const secondSucceeded = promiseWithResolvers<unknown>();
+      const firstCompletionSignal = promiseWithResolvers<void>();
+      const sessionID = "http://127.0.0.1:9999/session";
+      let firstTurnId: string | undefined;
+      runtimeMock.state.subscribedEvents = [
+        firstStarted.promise,
+        firstSucceeded.promise,
+        secondStarted.promise,
+        replayedFirstStep.promise,
+        secondStep.promise,
+        secondSucceeded.promise,
+      ];
+      const completed = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
+        Stream.tap((event) =>
+          event.turnId === firstTurnId
+            ? Effect.sync(() => firstCompletionSignal.resolve(undefined))
+            : Effect.void,
+        ),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const firstTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "First turn",
+        modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+      });
+      firstTurnId = firstTurn.turnId;
+      firstStarted.resolve({
+        id: "first-started",
+        created: 1,
+        type: "session.step.started",
+        durable: { aggregateID: sessionID, seq: 1, version: 1 },
+        data: {
+          sessionID,
+          assistantMessageID: "first-message",
+          agent: "build",
+          model: { providerID: "openai", id: "gpt-5" },
+          started: 1,
+        },
+      } satisfies OpenCodeEvent);
+      firstSucceeded.resolve({
+        id: "first-succeeded",
+        created: 3,
+        type: "session.execution.succeeded",
+        durable: { aggregateID: sessionID, seq: 3, version: 1 },
+        data: { sessionID },
+      } satisfies OpenCodeEvent);
+      yield* Effect.promise(() => firstCompletionSignal.promise);
+      const secondTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "Second turn",
+        modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+      });
+      secondStarted.resolve({
+        id: "second-started",
+        created: 4,
+        type: "session.step.started",
+        durable: { aggregateID: sessionID, seq: 4, version: 1 },
+        data: {
+          sessionID,
+          assistantMessageID: "second-message",
+          agent: "build",
+          model: { providerID: "openai", id: "gpt-5" },
+          started: 4,
+        },
+      } satisfies OpenCodeEvent);
+      replayedFirstStep.resolve({
+        id: "replayed-first-step",
+        created: 5,
+        type: "session.step.ended",
+        durable: { aggregateID: sessionID, seq: 2, version: 1 },
+        data: {
+          sessionID,
+          assistantMessageID: "first-message",
+          finish: "stop",
+          cost: 0,
+          tokens: { input: 100, output: 50, reasoning: 10, cache: { read: 9, write: 8 } },
+        },
+      } satisfies OpenCodeEvent);
+      secondStep.resolve({
+        id: "second-step",
+        created: 6,
+        type: "session.step.ended",
+        durable: { aggregateID: sessionID, seq: 5, version: 1 },
+        data: {
+          sessionID,
+          assistantMessageID: "second-message",
+          finish: "stop",
+          cost: 0,
+          tokens: { input: 10, output: 5, reasoning: 2, cache: { read: 3, write: 1 } },
+        },
+      } satisfies OpenCodeEvent);
+      secondSucceeded.resolve({
+        id: "second-succeeded",
+        created: 7,
+        type: "session.execution.succeeded",
+        durable: { aggregateID: sessionID, seq: 6, version: 1 },
+        data: { sessionID },
+      } satisfies OpenCodeEvent);
+
+      const turns = Array.from(yield* Fiber.join(completed));
+      const firstCompleted = turns.find((event) => event.turnId === firstTurn.turnId);
+      const secondCompleted = turns.find((event) => event.turnId === secondTurn.turnId);
+      NodeAssert.equal(firstCompleted?.type, "turn.completed");
+      if (firstCompleted?.type === "turn.completed") {
+        NodeAssert.equal(firstCompleted.payload.tokenUsage?.usageStatus, "partial");
+      }
+      NodeAssert.equal(secondCompleted?.type, "turn.completed");
+      if (secondCompleted?.type === "turn.completed") {
+        NodeAssert.deepEqual(secondCompleted.payload.tokenUsage, {
+          usageStatus: "complete",
+          usageScope: "main_agent",
+          inputTokens: 14,
+          cachedInputTokens: 3,
+          cacheCreationTokens: 1,
+          outputTokens: 7,
+          reasoningTokens: 2,
+          hasSubagents: false,
+        });
+      }
     }),
   );
 
@@ -4867,6 +5019,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const childCreated = promiseWithResolvers<unknown>();
       const childStep = promiseWithResolvers<unknown>();
       const childSucceeded = promiseWithResolvers<unknown>();
+      const parentStepStarted = promiseWithResolvers<unknown>();
       const parentStep = promiseWithResolvers<unknown>();
       const parentSucceeded = promiseWithResolvers<unknown>();
       runtimeMock.state.subscribedEvents = [
@@ -4874,6 +5027,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         childCreated.promise,
         childStep.promise,
         childSucceeded.promise,
+        parentStepStarted.promise,
         parentStep.promise,
         parentSucceeded.promise,
       ];
@@ -4935,11 +5089,24 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         durable: { aggregateID: childSessionID, seq: 3, version: 1 },
         data: { sessionID: childSessionID },
       } satisfies OpenCodeEvent);
+      parentStepStarted.resolve({
+        id: "parent-step-started",
+        created: 5,
+        type: "session.step.started",
+        durable: { aggregateID: sessionID, seq: 2, version: 1 },
+        data: {
+          sessionID,
+          assistantMessageID: "parent-message",
+          agent: "build",
+          model: { providerID: "openai", id: "gpt-5" },
+          started: 5,
+        },
+      } satisfies OpenCodeEvent);
       parentStep.resolve({
         id: "parent-step",
-        created: 5,
+        created: 6,
         type: "session.step.ended",
-        durable: { aggregateID: sessionID, seq: 2, version: 1 },
+        durable: { aggregateID: sessionID, seq: 3, version: 1 },
         data: {
           sessionID,
           assistantMessageID: "parent-message",
@@ -4950,9 +5117,9 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       } satisfies OpenCodeEvent);
       parentSucceeded.resolve({
         id: "parent-succeeded",
-        created: 6,
+        created: 7,
         type: "session.execution.succeeded",
-        durable: { aggregateID: sessionID, seq: 3, version: 1 },
+        durable: { aggregateID: sessionID, seq: 4, version: 1 },
         data: { sessionID },
       } satisfies OpenCodeEvent);
       const completed = Option.getOrThrow(yield* Fiber.join(completedFiber));

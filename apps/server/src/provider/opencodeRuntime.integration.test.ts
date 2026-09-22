@@ -153,6 +153,26 @@ describe.runIf(Boolean(binaryPath))("OpenCode v2 native API", () => {
       NodeAssert.ok(
         events.some((event) => event.type === "session.text.delta" && event.data.delta === reply),
       );
+      const waitSession = yield* Effect.promise(() =>
+        client.session.create({
+          location: { directory: workspace },
+          model: { providerID: "fixture", id: "chat" },
+        }),
+      );
+      yield* Effect.promise(() =>
+        client.session.prompt({ sessionID: waitSession.id, text: "Reply without tools" }),
+      );
+      yield* Effect.promise(() => client.session.wait({ sessionID: waitSession.id }));
+      const generated = yield* Effect.promise(() =>
+        client.message.list({ sessionID: waitSession.id }),
+      );
+      NodeAssert.ok(
+        generated.data.some(
+          (message) =>
+            message.type === "assistant" &&
+            message.content.some((part) => part.type === "text" && part.text === reply),
+        ),
+      );
       const history = yield* Effect.promise(() => client.message.list({ sessionID }));
       NodeAssert.ok(history.data.some((message) => message.id === "msg_fixture"));
       const fork = yield* Effect.promise(() =>
@@ -161,6 +181,7 @@ describe.runIf(Boolean(binaryPath))("OpenCode v2 native API", () => {
       const forkHistory = yield* Effect.promise(() => client.message.list({ sessionID: fork.id }));
       NodeAssert.equal(forkHistory.data.length, 0);
       yield* Effect.promise(() => client.session.compact({ sessionID }));
+      yield* Effect.promise(() => client.session.wait({ sessionID }));
       const compaction = yield* Effect.promise(() => untilIdle(stream, client, sessionID));
       NodeAssert.ok(compaction.some((event) => event.type === "session.compaction.ended"));
 
